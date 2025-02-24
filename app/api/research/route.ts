@@ -1,5 +1,4 @@
 import { NextRequest } from "next/server";
-
 import {
   deepResearch,
   generateFeedback,
@@ -16,15 +15,17 @@ export async function POST(req: NextRequest) {
       modelId = "o3-mini",
     } = await req.json();
 
-    // Retrieve API keys from secure cookies
-    const openaiKey = req.cookies.get("openai-key")?.value;
-    const firecrawlKey = req.cookies.get("firecrawl-key")?.value;
+    // Use environment variables directly instead of cookies
+    const openaiKey = process.env.OPENAI_API_KEY;
+    const firecrawlKey = process.env.FIRECRAWL_KEY;
 
-    // Add API key validation
+    // Optional: If your .env sets NEXT_PUBLIC_ENABLE_API_KEYS=true, we require the keys
     if (process.env.NEXT_PUBLIC_ENABLE_API_KEYS === "true") {
       if (!openaiKey || !firecrawlKey) {
-        return Response.json(
-          { error: "API keys are required but not provided" },
+        return new Response(
+          JSON.stringify({
+            error: "API keys are required but not provided",
+          }),
           { status: 401 }
         );
       }
@@ -43,10 +44,12 @@ export async function POST(req: NextRequest) {
     });
 
     try {
+      // Create the chosen model instance
       const model = createModel(modelId as AIModel, openaiKey);
       console.log("\n🤖 [RESEARCH ROUTE] === Model Created ===");
       console.log("Using Model:", modelId);
 
+      // Prepare server-sent events streaming
       const encoder = new TextEncoder();
       const stream = new TransformStream();
       const writer = stream.writable.getWriter();
@@ -55,9 +58,11 @@ export async function POST(req: NextRequest) {
         try {
           console.log("\n🚀 [RESEARCH ROUTE] === Research Started ===");
 
+          // 1) Generate some clarifying feedback questions
           const feedbackQuestions = await generateFeedback({
             query,
-            modelId,
+            numQuestions: 3,
+            modelId: modelId as AIModel,
             apiKey: openaiKey,
           });
           await writer.write(
@@ -68,10 +73,12 @@ export async function POST(req: NextRequest) {
                   type: "query",
                   content: "Generated feedback questions",
                 },
+                feedbackQuestions,
               })}\n\n`
             )
           );
 
+          // 2) Perform a multi-step "deep" research
           const { learnings, visitedUrls } = await deepResearch({
             query,
             breadth,
@@ -98,6 +105,7 @@ export async function POST(req: NextRequest) {
           console.log("Learnings Count:", learnings.length);
           console.log("Visited URLs Count:", visitedUrls.length);
 
+          // 3) Write final summary "report"
           const report = await writeFinalReport({
             prompt: query,
             learnings,
@@ -105,6 +113,7 @@ export async function POST(req: NextRequest) {
             model,
           });
 
+          // 4) Stream the final result
           await writer.write(
             encoder.encode(
               `data: ${JSON.stringify({
@@ -142,11 +151,17 @@ export async function POST(req: NextRequest) {
     } catch (error) {
       console.error("\n💥 [RESEARCH ROUTE] === Route Error ===");
       console.error("Error:", error);
-      return Response.json({ error: "Research failed" }, { status: 500 });
+      return new Response(
+        JSON.stringify({ error: "Research failed" }),
+        { status: 500 }
+      );
     }
   } catch (error) {
     console.error("\n💥 [RESEARCH ROUTE] === Parse Error ===");
     console.error("Error:", error);
-    return Response.json({ error: "Research failed" }, { status: 500 });
+    return new Response(
+      JSON.stringify({ error: "Research failed" }),
+      { status: 500 }
+    );
   }
 }

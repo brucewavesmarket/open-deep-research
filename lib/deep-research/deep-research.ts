@@ -1,10 +1,10 @@
-import FirecrawlApp, { SearchResponse } from '@mendable/firecrawl-js';
-import { generateObject } from 'ai';
-import { compact } from 'lodash-es';
-import { z } from 'zod';
+import FirecrawlApp, { SearchResponse } from "@mendable/firecrawl-js";
+import { generateObject } from "ai";
+import { compact } from "lodash-es";
+import { z } from "zod";
 
-import { createModel, trimPrompt } from './ai/providers';
-import { systemPrompt } from './prompt';
+import { createModel, trimPrompt } from "./ai/providers";
+import { systemPrompt } from "./prompt";
 
 type ResearchResult = {
   learnings: string[];
@@ -22,179 +22,121 @@ type DeepResearchOptions = {
   firecrawlKey?: string;
 };
 
-// Update the firecrawl initialization to use the provided key
-const getFirecrawl = (apiKey?: string) =>
-  new FirecrawlApp({
-    apiKey: apiKey ?? process.env.FIRECRAWL_KEY ?? '',
-    apiUrl: process.env.FIRECRAWL_BASE_URL,
+// Instantiate Firecrawl with whichever key is available
+function getFirecrawl(apiKey?: string) {
+  return new FirecrawlApp({
+    apiKey: apiKey ?? process.env.FIRECRAWL_KEY ?? "",
+    apiUrl: process.env.FIRECRAWL_BASE_URL, // if needed
   });
+}
 
-// Helper function to format progress messages consistently
-const formatProgress = {
-  generating: (count: number, query: string) =>
-    `Generating up to ${count} SERP queries\n${query}`,
+/**
+ * Asks the model to produce a JSON analysis of the discovered text,
+ * including "gaps", "shouldContinue", "nextSearchTopic", etc.
+ */
+async function analyzeAndPlan({
+  textContents,
+  query,
+  model,
+  onProgress,
+}: {
+  textContents: string[];
+  query: string;
+  model: ReturnType<typeof createModel>;
+  onProgress?: (update: string) => Promise<void>;
+}) {
+  const textBlocks = textContents.map((c) => `<content>\n${c}\n</content>`).join("\n");
+  const prompt = `
+You have the following partial research results from searching "<query>${query}</query>". 
+The raw text is:
 
-  created: (count: number, queries: string) =>
-    `Created ${count} SERP queries\n${queries}`,
+${textBlocks}
 
-  researching: (query: string) => `Researching\n${query}`,
+Produce an "analysis" JSON object with the following structure:
 
-  found: (count: number, query: string) => `Found ${count} results\n${query}`,
-
-  ran: (query: string, count: number) =>
-    `Ran "${query}"\n${count} content items found`,
-
-  generated: (count: number, query: string) =>
-    `Generated ${count} learnings\n${query}`,
-};
-
-// Helper function to log and stream messages
-async function logProgress(
-  message: string,
-  onProgress?: (update: string) => Promise<void>,
-) {
-  if (onProgress) {
-    await onProgress(message);
+{
+  "analysis": {
+    "summary": "A short summary of new findings discovered",
+    "gaps": ["array of open questions or missing info if any exist"],
+    "shouldContinue": true or false, 
+    "nextSearchTopic": "If you think we should do another search, provide the search topic or relevant angle. Otherwise an empty string."
   }
 }
 
-// take en user query, return a list of SERP queries
-async function generateSerpQueries({
-  query,
-  numQueries = 3,
-  learnings,
-  onProgress,
-  model,
-}: {
-  query: string;
-  numQueries?: number;
+- "gaps": things we have not learned or any unclear aspects we might still investigate
+- "shouldContinue": set true if we should keep searching and investigating, false if it's sufficient
+- "nextSearchTopic": if "shouldContinue" is true, suggest a short query or angle
 
-  // optional, if provided, the research will continue from the last learning
-  learnings?: string[];
-  onProgress?: (update: string) => Promise<void>;
-  model: ReturnType<typeof createModel>;
-}) {
-  await logProgress(formatProgress.generating(numQueries, query), onProgress);
+Please follow the exact JSON format. Do not add other keys.
+`;
 
-  const res = await generateObject({
-    model,
-    system: systemPrompt(),
-    prompt: `Given the following prompt from the user, generate a list of SERP queries to research the topic. Return a maximum of ${numQueries} queries, but feel free to return less if the original prompt is clear. Make sure each query is unique and not similar to each other: <prompt>${query}</prompt>\n\n${
-      learnings
-        ? `Here are some learnings from previous research, use them to generate more specific queries: ${learnings.join(
-            '\n',
-          )}`
-        : ''
-    }`,
-    schema: z.object({
-      queries: z
-        .array(
-          z.object({
-            query: z.string().describe('The SERP query'),
-            researchGoal: z
-              .string()
-              .describe(
-                'First talk about the goal of the research that this query is meant to accomplish, then go deeper into how to advance the research once the results are found, mention additional research directions. Be as specific as possible, especially for additional research directions.',
-              ),
-          }),
-        )
-        .describe(`List of SERP queries, max of ${numQueries}`),
-    }),
-  });
+  await onProgress?.("Analyzing & planning next steps...");
 
-  const queriesList = res.object.queries.map(q => q.query).join(', ');
-  await logProgress(
-    formatProgress.created(res.object.queries.length, queriesList),
-    onProgress,
-  );
+  try {
+    const result = await generateObject({
+      model,
+      system: systemPrompt(),
+      prompt,
+      schema: z.object({
+        analysis: z.object({
+          summary: z.string(),
+          gaps: z.array(z.string()),
+          shouldContinue: z.boolean(),
+          nextSearchTopic: z.string(),
+        }),
+      }),
+    });
 
-  return res.object.queries.slice(0, numQueries).map(q => q.query);
+    return result.object.analysis;
+  } catch (err) {
+    console.error("Analysis and planning error:", err);
+    return null;
+  }
 }
 
-async function processSerpResult({
+/**
+ * Summarize search results into "learnings"
+ */
+async function summarizeSearchResults({
   query,
-  result,
-  numLearnings = 3,
-  numFollowUpQuestions = 3,
-  onProgress,
+  searchResult,
   model,
+  onProgress,
 }: {
   query: string;
-  result: SearchResponse;
-  numLearnings?: number;
-  numFollowUpQuestions?: number;
-  onProgress?: (update: string) => Promise<void>;
+  searchResult: SearchResponse;
   model: ReturnType<typeof createModel>;
-}) {
-  const contents = compact(result.data.map(item => item.markdown)).map(
-    content => trimPrompt(content, 25_000),
+  onProgress?: (update: string) => Promise<void>;
+}): Promise<string[]> {
+  await onProgress?.(`Summarizing search results for "${query}"...`);
+
+  const textContents = compact(searchResult.data.map((r) => r.markdown)).map(
+    (content) => trimPrompt(content, 25_000)
   );
 
-  await logProgress(formatProgress.ran(query, contents.length), onProgress);
-
-  const res = await generateObject({
+  // Summarize as bullet points
+  const summarizer = await generateObject({
     model,
-    abortSignal: AbortSignal.timeout(60_000),
     system: systemPrompt(),
-    prompt: `Given the following contents from a SERP search for the query <query>${query}</query>, generate a list of learnings from the contents. Return a maximum of ${numLearnings} learnings, but feel free to return less if the contents are clear. Make sure each learning is unique and not similar to each other. The learnings should be concise and to the point, as detailed and information dense as possible. Make sure to include any entities like people, places, companies, products, things, etc in the learnings, as well as any exact metrics, numbers, or dates. The learnings will be used to research the topic further.\n\n<contents>${contents
-      .map(content => `<content>\n${content}\n</content>`)
-      .join('\n')}</contents>`,
-    schema: z.object({
-      learnings: z
-        .array(z.string())
-        .describe(`List of learnings, max of ${numLearnings}`),
-      followUpQuestions: z
-        .array(z.string())
-        .describe(
-          `List of follow-up questions to research the topic further, max of ${numFollowUpQuestions}`,
-        ),
-    }),
-  });
+    prompt: `You have the following text from a search on "${query}":
+${textContents.map((c) => `<content>\n${c}\n</content>`).join("\n")}
 
-  await logProgress(
-    formatProgress.generated(res.object.learnings.length, query),
-    onProgress,
-  );
-
-  return res.object;
+Return a JSON object:
+{
+  "learnings": [
+    "key point or fact #1",
+    "key point or fact #2",
+    ...
+  ]
 }
 
-export async function writeFinalReport({
-  prompt,
-  learnings,
-  visitedUrls,
-  model,
-}: {
-  prompt: string;
-  learnings: string[];
-  visitedUrls: string[];
-  model: ReturnType<typeof createModel>;
-}) {
-  const learningsString = trimPrompt(
-    learnings
-      .map(learning => `<learning>\n${learning}\n</learning>`)
-      .join('\n'),
-    150_000,
-  );
-
-  const res = await generateObject({
-    model,
-    system: systemPrompt(),
-    prompt: `Given the following prompt from the user, write a final report on the topic using the learnings from research and format it in proper Markdown. Use Markdown syntax (headings, lists, horizontal rules, etc.) to structure the document. Aim for a detailed report of at least 3 pages.\n\n<prompt>${prompt}</prompt>\n\nHere are all the learnings from previous research:\n\n<learnings>\n${learningsString}\n</learnings>`,
+Only produce up to 5 bullet points in "learnings". Be concise but factual.`,
     schema: z.object({
-      reportMarkdown: z
-        .string()
-        .describe('Final report on the topic in Markdown'),
+      learnings: z.array(z.string()),
     }),
   });
 
-  // Append the visited URLs as a markdown formatted Sources section
-  const urlsSection = `\n\n## Sources\n\n${visitedUrls
-    .map(url => `- ${url}`)
-    .join('\n')}`;
-
-  // Prepend a primary markdown heading to make sure the UI renders it as markdown
-  return `# Research Report\n\n${res.object.reportMarkdown}${urlsSection}`;
+  return summarizer.object.learnings;
 }
 
 export async function deepResearch({
@@ -206,81 +148,190 @@ export async function deepResearch({
   onProgress,
   model,
   firecrawlKey,
-}: DeepResearchOptions): Promise<ResearchResult> {
+}: DeepResearchOptions): Promise<{
+  learnings: string[];
+  visitedUrls: string[];
+}> {
   const firecrawl = getFirecrawl(firecrawlKey);
-  const results: ResearchResult[] = [];
+  let combinedLearnings = [...learnings];
+  let combinedUrls = [...visitedUrls];
 
-  // Generate SERP queries
-  await logProgress(formatProgress.generating(breadth, query), onProgress);
-
-  const serpQueries = await generateSerpQueries({
-    query,
-    learnings,
-    numQueries: breadth,
-    onProgress,
-    model,
-  });
-
-  await logProgress(
-    formatProgress.created(serpQueries.length, serpQueries.join(', ')),
-    onProgress,
+  await onProgress?.(
+    `Starting research on "${query}" with breadth=${breadth}, depth=${depth}...`
   );
 
-  // Process each SERP query
-  for (const serpQuery of serpQueries) {
-    try {
-      await logProgress(formatProgress.researching(serpQuery), onProgress);
+  // We do a nested loop: for 'depth' times, we generate 'breadth' queries,
+  // then search, summarize, analyze, decide if we continue.
+  for (let d = 0; d < depth; d++) {
+    await onProgress?.(`Depth iteration: ${d + 1}/${depth}...`);
 
-      const searchResults = await firecrawl.search(serpQuery, {
+    // Step 1) Generate some sub-queries for this iteration
+    const subQueries = await generateSubQueries({
+      query,
+      existingLearnings: combinedLearnings,
+      model,
+      count: breadth,
+    });
+    await onProgress?.(`Generated sub-queries: ${JSON.stringify(subQueries)}`);
+
+    for (const sq of subQueries) {
+      // Step 2) Firecrawl search
+      await onProgress?.(`Searching: ${sq}`);
+      const result = await firecrawl.search(sq, {
         timeout: 15000,
-        limit: 5,
-        scrapeOptions: { formats: ['markdown'] },
+        limit: 4,
+        scrapeOptions: { formats: ["markdown"] },
       });
 
-      await logProgress(
-        formatProgress.found(searchResults.data.length, serpQuery),
+      // Combine visited URLs
+      const foundUrls = result.data
+        .map((r) => r.url)
+        .filter((u): u is string => !!u);
+      combinedUrls.push(...foundUrls);
+
+      // Step 3) Summarize
+      const newLearnings = await summarizeSearchResults({
+        query: sq,
+        searchResult: result,
+        model,
         onProgress,
-      );
-
-      if (searchResults.data.length > 0) {
-        await logProgress(
-          formatProgress.ran(serpQuery, searchResults.data.length),
-          onProgress,
-        );
-
-        const newLearnings = await processSerpResult({
-          query: serpQuery,
-          result: searchResults,
-          numLearnings: Math.ceil(breadth / 2),
-          numFollowUpQuestions: Math.ceil(breadth / 2),
-          onProgress,
-          model,
-        });
-
-        await logProgress(
-          formatProgress.generated(newLearnings.learnings.length, serpQuery),
-          onProgress,
-        );
-
-        results.push({
-          learnings: newLearnings.learnings,
-          visitedUrls: searchResults.data
-            .map(r => r.url)
-            .filter((url): url is string => url != null),
-        });
-      }
-    } catch (e) {
-      console.error(`Error running query: ${serpQuery}: `, e);
-      await logProgress(`Error running "${serpQuery}": ${e}`, onProgress);
-      results.push({
-        learnings: [],
-        visitedUrls: [],
       });
+      combinedLearnings.push(...newLearnings);
+
+      // Step 4) Analyze & decide if we want to continue
+      const analysis = await analyzeAndPlan({
+        textContents: newLearnings,
+        query: sq,
+        model,
+        onProgress,
+      });
+
+      if (!analysis) {
+        await onProgress?.("Analysis failed; continuing to next sub-query...");
+        continue;
+      }
+
+      await onProgress?.(`Analysis summary: ${analysis.summary}`);
+
+      // If the LLM says "stop," then break out
+      if (!analysis.shouldContinue) {
+        await onProgress?.("LLM indicated we should stop here.");
+        return {
+          learnings: combinedLearnings,
+          visitedUrls: combinedUrls,
+        };
+      }
+
+      // If there’s a recommended next topic, override `query` for the next iteration
+      if (analysis.nextSearchTopic.trim()) {
+        await onProgress?.(`Next search topic: ${analysis.nextSearchTopic}`);
+        query = analysis.nextSearchTopic;
+      }
     }
+    // Move to the next depth iteration if we haven't returned early
   }
 
+  // If we complete the loops, return
   return {
-    learnings: Array.from(new Set(results.flatMap(r => r.learnings))),
-    visitedUrls: Array.from(new Set(results.flatMap(r => r.visitedUrls))),
+    learnings: combinedLearnings,
+    visitedUrls: combinedUrls,
   };
+}
+
+/**
+ * Basic function to produce "sub-queries" for each iteration,
+ * referencing known learnings so it can refine.
+ */
+async function generateSubQueries({
+  query,
+  existingLearnings,
+  model,
+  count,
+}: {
+  query: string;
+  existingLearnings: string[];
+  model: ReturnType<typeof createModel>;
+  count: number;
+}): Promise<string[]> {
+  const prompt = `
+You are creating short, specific search queries for investigating the main topic:
+<mainTopic>${query}</mainTopic>
+
+We have these existing partial learnings:
+${existingLearnings.map((l) => `- ${l}`).join("\n")}
+
+Generate up to ${count} short, distinct Google-like queries that each investigate an unresolved angle or gap in the knowledge.
+
+Return JSON in the following format:
+{
+  "queries": [
+    "short query 1",
+    "short query 2",
+    ...
+  ]
+}
+
+Ensure each query is short, realistic, and focuses on a single subtopic or new angle.
+`;
+
+  const obj = await generateObject({
+    model,
+    system: systemPrompt(),
+    prompt,
+    schema: z.object({
+      queries: z.array(z.string()),
+    }),
+  });
+
+  return obj.object.queries.slice(0, count);
+}
+
+/**
+ * After we've compiled all learnings, produce a final "report"
+ */
+export async function writeFinalReport({
+  prompt,
+  learnings,
+  visitedUrls,
+  model,
+}: {
+  prompt: string;
+  learnings: string[];
+  visitedUrls: string[];
+  model: ReturnType<typeof createModel>;
+}) {
+  // Merge learnings into a single string
+  const merged = learnings.map((l) => `- ${l}`).join("\n");
+  const sources = visitedUrls.map((u) => `- ${u}`).join("\n");
+
+  // Let the model produce a final, long markdown doc
+  const final = await generateObject({
+    model,
+    system: systemPrompt(),
+    prompt: `
+The user originally asked: <prompt>${prompt}</prompt>
+
+We have the following combined learnings from the multi-step research:
+${merged}
+
+Write a comprehensive final research report in Markdown. 
+It should include:
+- A short introduction
+- Key findings with relevant detail
+- Potential next steps or open questions
+- A "Sources" section listing the visited URLs
+
+Return JSON in the format:
+{
+  "reportMarkdown": "Full markdown text"
+}
+`,
+    schema: z.object({
+      reportMarkdown: z.string(),
+    }),
+  });
+
+  // Optionally append a final "## Sources" if not included
+  const finalReport = final.object.reportMarkdown;
+  return finalReport;
 }

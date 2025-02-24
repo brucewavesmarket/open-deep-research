@@ -1,6 +1,5 @@
 interface TextSplitterParams {
   chunkSize: number;
-
   chunkOverlap: number;
 }
 
@@ -12,7 +11,7 @@ abstract class TextSplitter implements TextSplitterParams {
     this.chunkSize = fields?.chunkSize ?? this.chunkSize;
     this.chunkOverlap = fields?.chunkOverlap ?? this.chunkOverlap;
     if (this.chunkOverlap >= this.chunkSize) {
-      throw new Error('Cannot have chunkOverlap >= chunkSize');
+      throw new Error("Cannot have chunkOverlap >= chunkSize");
     }
   }
 
@@ -21,8 +20,8 @@ abstract class TextSplitter implements TextSplitterParams {
   createDocuments(texts: string[]): string[] {
     const documents: string[] = [];
     for (let i = 0; i < texts.length; i += 1) {
-      const text = texts[i];
-      for (const chunk of this.splitText(text!)) {
+      const txt = texts[i];
+      for (const chunk of this.splitText(txt!)) {
         documents.push(chunk);
       }
     }
@@ -35,7 +34,7 @@ abstract class TextSplitter implements TextSplitterParams {
 
   private joinDocs(docs: string[], separator: string): string | null {
     const text = docs.join(separator).trim();
-    return text === '' ? null : text;
+    return text === "" ? null : text;
   }
 
   mergeSplits(splits: string[], separator: string): string[] {
@@ -47,8 +46,7 @@ abstract class TextSplitter implements TextSplitterParams {
       if (total + _len >= this.chunkSize) {
         if (total > this.chunkSize) {
           console.warn(
-            `Created a chunk of size ${total}, +
-which is longer than the specified ${this.chunkSize}`,
+            `Created a chunk of size ${total}, which is longer than specified ${this.chunkSize}`
           );
         }
         if (currentDoc.length > 0) {
@@ -56,13 +54,7 @@ which is longer than the specified ${this.chunkSize}`,
           if (doc !== null) {
             docs.push(doc);
           }
-          // Keep on popping if:
-          // - we have a larger chunk than in the chunk overlap
-          // - or if we still have any chunks and the length is long
-          while (
-            total > this.chunkOverlap ||
-            (total + _len > this.chunkSize && total > 0)
-          ) {
+          while (total > this.chunkOverlap) {
             total -= currentDoc[0]!.length;
             currentDoc.shift();
           }
@@ -79,8 +71,7 @@ which is longer than the specified ${this.chunkSize}`,
   }
 }
 
-export interface RecursiveCharacterTextSplitterParams
-  extends TextSplitterParams {
+export interface RecursiveCharacterTextSplitterParams extends TextSplitterParams {
   separators: string[];
 }
 
@@ -88,7 +79,7 @@ export class RecursiveCharacterTextSplitter
   extends TextSplitter
   implements RecursiveCharacterTextSplitterParams
 {
-  separators: string[] = ['\n\n', '\n', '.', ',', '>', '<', ' ', ''];
+  separators: string[] = ["\n\n", "\n", ".", ",", ">", "<", " ", ""];
 
   constructor(fields?: Partial<RecursiveCharacterTextSplitterParams>) {
     super(fields);
@@ -98,10 +89,9 @@ export class RecursiveCharacterTextSplitter
   splitText(text: string): string[] {
     const finalChunks: string[] = [];
 
-    // Get appropriate separator to use
     let separator: string = this.separators[this.separators.length - 1]!;
     for (const s of this.separators) {
-      if (s === '') {
+      if (s === "") {
         separator = s;
         break;
       }
@@ -111,32 +101,30 @@ export class RecursiveCharacterTextSplitter
       }
     }
 
-    // Now that we have the separator, split the text
     let splits: string[];
     if (separator) {
       splits = text.split(separator);
     } else {
-      splits = text.split('');
+      splits = text.split("");
     }
 
-    // Now go merging things, recursively splitting longer texts.
     let goodSplits: string[] = [];
-    for (const s of splits) {
-      if (s.length < this.chunkSize) {
-        goodSplits.push(s);
+    for (const part of splits) {
+      if (part.length < this.chunkSize) {
+        goodSplits.push(part);
       } else {
         if (goodSplits.length) {
-          const mergedText = this.mergeSplits(goodSplits, separator);
-          finalChunks.push(...mergedText);
+          const merged = this.mergeSplits(goodSplits, separator);
+          finalChunks.push(...merged);
           goodSplits = [];
         }
-        const otherInfo = this.splitText(s);
+        const otherInfo = this.splitText(part);
         finalChunks.push(...otherInfo);
       }
     }
     if (goodSplits.length) {
-      const mergedText = this.mergeSplits(goodSplits, separator);
-      finalChunks.push(...mergedText);
+      const merged = this.mergeSplits(goodSplits, separator);
+      finalChunks.push(...merged);
     }
     return finalChunks;
   }
