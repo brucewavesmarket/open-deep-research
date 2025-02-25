@@ -6,6 +6,163 @@ import { z } from "zod";
 import { createModel, trimPrompt } from "./ai/providers";
 import { systemPrompt } from "./prompt";
 
+/** 
+ *  Plan & Subtopic Structures 
+ */
+export interface ResearchPlan {
+  overarchingGoal: string;
+  subtopics: Array<{
+    name: string;
+    purpose: string;
+    subSubtopics: Array<{
+      name: string;
+      criteria: string;
+    }>;
+  }>;
+}
+
+/** 
+ * Step 1) parseResearchPlan:
+ * Takes the user query & clarifications, returns an overarchingGoal, subtopics, sub-subtopics
+ */
+export async function parseResearchPlan({
+  query,
+  model,
+}: {
+  query: string;
+  model: ReturnType<typeof createModel>;
+}): Promise<ResearchPlan> {
+  const prompt = `
+The user has a research request:
+<userQuery>${query}</userQuery>
+
+We want a plan in JSON with:
+- "overarchingGoal": a short summary (1-3 sentences) of the main purpose/why
+- "subtopics": an array, each with:
+   "name": short name of subtopic
+   "purpose": short explanation (1-2 sentences) of that subtopic's role
+   "subSubtopics": an array of objects, each with:
+       "name": sub-subtopic name or sub-goal 
+       "criteria": definition of success or detail to investigate
+
+No matter how simple the user query is, produce at least 1 subtopic with subSubtopics. If it's truly single-faceted, just produce 1 subtopic with minimal subSubtopics. If complex, break it down more.
+
+Return exactly:
+{
+  "overarchingGoal": "string",
+  "subtopics": [
+    {
+      "name": "string",
+      "purpose": "string",
+      "subSubtopics": [
+        {
+          "name": "string",
+          "criteria": "string"
+        },
+        ...
+      ]
+    },
+    ...
+  ]
+}
+`;
+
+  // Use zod to enforce the structure
+  const planSchema = z.object({
+    overarchingGoal: z.string(),
+    subtopics: z.array(
+      z.object({
+        name: z.string(),
+        purpose: z.string(),
+        subSubtopics: z.array(
+          z.object({
+            name: z.string(),
+            criteria: z.string(),
+          })
+        ),
+      })
+    ),
+  });
+
+  const parsed = await generateObject({
+    model,
+    system: systemPrompt(),
+    prompt,
+    schema: planSchema,
+  });
+
+  return parsed.object;
+}
+
+/** 
+ * Step 2) deepResearchSubtopic:
+ *  Runs a research loop for a single subtopic in parallel with others
+ */
+export async function deepResearchSubtopic({
+  subtopic,
+  overarchingGoal,
+  breadth,
+  depth,
+  model,
+  firecrawlKey,
+  onProgress,
+}: {
+  subtopic: ResearchPlan["subtopics"][number]; 
+  overarchingGoal: string;
+  breadth: number;
+  depth: number;
+  model: ReturnType<typeof createModel>;
+  firecrawlKey?: string;
+  onProgress?: (update: string) => Promise<void>;
+}): Promise<{
+  subtopicName: string;
+  learnings: string[];
+  visitedUrls: string[];
+}> {
+  // Construct a "big picture" query for the subtopic 
+  // referencing the overarchingGoal, subtopic purpose, sub-subtopics, etc.
+  const subtopicPrompt = `
+Overarching Goal:
+${overarchingGoal}
+
+Subtopic: ${subtopic.name}
+Purpose: ${subtopic.purpose}
+Sub-Subtopics:
+${subtopic.subSubtopics
+  .map((ss) => `- ${ss.name}: ${ss.criteria}`)
+  .join("\n")}
+
+Your job is to gather knowledge specifically about the above subtopic, 
+while keeping the overarching goal in mind. 
+But do NOT research unrelated details from other subtopics. 
+Focus on items that fulfill the success criteria above.
+
+`;
+
+
+  // We can reuse the existing "deepResearch" logic 
+  // by injecting this subtopicPrompt as the "query"
+  const { learnings, visitedUrls } = await deepResearch({
+    query: subtopicPrompt,
+    breadth,
+    depth,
+    model,
+    firecrawlKey,
+    onProgress,
+  });
+
+  return {
+    subtopicName: subtopic.name,
+    learnings,
+    visitedUrls,
+  };
+}
+
+/** 
+ * Our existing deepResearch logic from prior code 
+ * but updated to be exported 
+ */
+
 type ResearchResult = {
   learnings: string[];
   visitedUrls: string[];
@@ -22,18 +179,54 @@ type DeepResearchOptions = {
   firecrawlKey?: string;
 };
 
-// Instantiate Firecrawl with whichever key is available
 function getFirecrawl(apiKey?: string) {
   return new FirecrawlApp({
     apiKey: apiKey ?? process.env.FIRECRAWL_KEY ?? "",
-    apiUrl: process.env.FIRECRAWL_BASE_URL, // if needed
   });
 }
 
-/**
- * Asks the model to produce a JSON analysis of the discovered text,
- * including "gaps", "shouldContinue", "nextSearchTopic", etc.
- */
+// Summarize
+async function summarizeSearchResults({
+  query,
+  searchResult,
+  model,
+  onProgress,
+}: {
+  query: string;
+  searchResult: SearchResponse;
+  model: ReturnType<typeof createModel>;
+  onProgress?: (update: string) => Promise<void>;
+}) {
+  await onProgress?.(`Summarizing search results for "${query}"...`);
+
+  const textContents = compact(searchResult.data.map((r) => r.markdown)).map(
+    (c) => trimPrompt(c, 25_000)
+  );
+
+  const summarizer = await generateObject({
+    model,
+    system: systemPrompt(),
+    prompt: `
+We found the following data for "${query}":
+${textContents.map((c) => `<content>\n${c}\n</content>`).join("\n")}
+
+Return JSON:
+{
+  "learnings": [
+    "key bullet point #1",
+    "key bullet point #2",
+    ...
+  ]
+}`,
+    schema: z.object({
+      learnings: z.array(z.string()),
+    }),
+  });
+
+  return summarizer.object.learnings;
+}
+
+// Analyze
 async function analyzeAndPlan({
   textContents,
   query,
@@ -45,29 +238,20 @@ async function analyzeAndPlan({
   model: ReturnType<typeof createModel>;
   onProgress?: (update: string) => Promise<void>;
 }) {
-  const textBlocks = textContents.map((c) => `<content>\n${c}\n</content>`).join("\n");
   const prompt = `
-You have the following partial research results from searching "<query>${query}</query>". 
-The raw text is:
+You have partial results from searching: "${query}". 
+Contents: 
+${textContents.map((c) => `<content>\n${c}\n</content>`).join("\n")}
 
-${textBlocks}
-
-Produce an "analysis" JSON object with the following structure:
-
+Produce:
 {
   "analysis": {
-    "summary": "A short summary of new findings discovered",
-    "gaps": ["array of open questions or missing info if any exist"],
-    "shouldContinue": true or false, 
-    "nextSearchTopic": "If you think we should do another search, provide the search topic or relevant angle. Otherwise an empty string."
+    "summary": "...",
+    "gaps": [...],
+    "shouldContinue": true or false,
+    "nextSearchTopic": "string"
   }
 }
-
-- "gaps": things we have not learned or any unclear aspects we might still investigate
-- "shouldContinue": set true if we should keep searching and investigating, false if it's sufficient
-- "nextSearchTopic": if "shouldContinue" is true, suggest a short query or angle
-
-Please follow the exact JSON format. Do not add other keys.
 `;
 
   await onProgress?.("Analyzing & planning next steps...");
@@ -86,59 +270,16 @@ Please follow the exact JSON format. Do not add other keys.
         }),
       }),
     });
-
     return result.object.analysis;
-  } catch (err) {
-    console.error("Analysis and planning error:", err);
+  } catch {
     return null;
   }
 }
 
 /**
- * Summarize search results into "learnings"
+ * The main "deepResearch" function: we do a BFS-like approach 
+ * for multiple search queries each iteration
  */
-async function summarizeSearchResults({
-  query,
-  searchResult,
-  model,
-  onProgress,
-}: {
-  query: string;
-  searchResult: SearchResponse;
-  model: ReturnType<typeof createModel>;
-  onProgress?: (update: string) => Promise<void>;
-}): Promise<string[]> {
-  await onProgress?.(`Summarizing search results for "${query}"...`);
-
-  const textContents = compact(searchResult.data.map((r) => r.markdown)).map(
-    (content) => trimPrompt(content, 25_000)
-  );
-
-  // Summarize as bullet points
-  const summarizer = await generateObject({
-    model,
-    system: systemPrompt(),
-    prompt: `You have the following text from a search on "${query}":
-${textContents.map((c) => `<content>\n${c}\n</content>`).join("\n")}
-
-Return a JSON object:
-{
-  "learnings": [
-    "key point or fact #1",
-    "key point or fact #2",
-    ...
-  ]
-}
-
-Only produce up to 5 bullet points in "learnings". Be concise but factual.`,
-    schema: z.object({
-      learnings: z.array(z.string()),
-    }),
-  });
-
-  return summarizer.object.learnings;
-}
-
 export async function deepResearch({
   query,
   breadth = 3,
@@ -148,48 +289,39 @@ export async function deepResearch({
   onProgress,
   model,
   firecrawlKey,
-}: DeepResearchOptions): Promise<{
-  learnings: string[];
-  visitedUrls: string[];
-}> {
+}: DeepResearchOptions): Promise<ResearchResult> {
   const firecrawl = getFirecrawl(firecrawlKey);
   let combinedLearnings = [...learnings];
   let combinedUrls = [...visitedUrls];
 
-  await onProgress?.(
-    `Starting research on "${query}" with breadth=${breadth}, depth=${depth}...`
-  );
+  await onProgress?.(`Starting deepResearch on: ${query}`);
 
-  // We do a nested loop: for 'depth' times, we generate 'breadth' queries,
-  // then search, summarize, analyze, decide if we continue.
   for (let d = 0; d < depth; d++) {
     await onProgress?.(`Depth iteration: ${d + 1}/${depth}...`);
 
-    // Step 1) Generate some sub-queries for this iteration
+    // Step 1) generate subQueries
     const subQueries = await generateSubQueries({
       query,
       existingLearnings: combinedLearnings,
       model,
       count: breadth,
     });
-    await onProgress?.(`Generated sub-queries: ${JSON.stringify(subQueries)}`);
+    await onProgress?.(`Generated queries: ${JSON.stringify(subQueries)}`);
 
+    // Step 2) run them in sequence (could also do parallel here if wanted)
     for (const sq of subQueries) {
-      // Step 2) Firecrawl search
       await onProgress?.(`Searching: ${sq}`);
       const result = await firecrawl.search(sq, {
         timeout: 15000,
-        limit: 4,
+        limit: 5,
         scrapeOptions: { formats: ["markdown"] },
       });
 
-      // Combine visited URLs
-      const foundUrls = result.data
-        .map((r) => r.url)
-        .filter((u): u is string => !!u);
+      // gather URLs
+      const foundUrls = result.data.map((r) => r.url).filter(Boolean) as string[];
       combinedUrls.push(...foundUrls);
 
-      // Step 3) Summarize
+      // Step 3) summarize
       const newLearnings = await summarizeSearchResults({
         query: sq,
         searchResult: result,
@@ -198,50 +330,37 @@ export async function deepResearch({
       });
       combinedLearnings.push(...newLearnings);
 
-      // Step 4) Analyze & decide if we want to continue
+      // Step 4) analyze
       const analysis = await analyzeAndPlan({
         textContents: newLearnings,
         query: sq,
         model,
         onProgress,
       });
+      if (!analysis) continue;
 
-      if (!analysis) {
-        await onProgress?.("Analysis failed; continuing to next sub-query...");
-        continue;
-      }
-
-      await onProgress?.(`Analysis summary: ${analysis.summary}`);
-
-      // If the LLM says "stop," then break out
       if (!analysis.shouldContinue) {
-        await onProgress?.("LLM indicated we should stop here.");
+        await onProgress?.(`Stopping early: ${analysis.summary}`);
         return {
           learnings: combinedLearnings,
           visitedUrls: combinedUrls,
         };
       }
 
-      // If there’s a recommended next topic, override `query` for the next iteration
       if (analysis.nextSearchTopic.trim()) {
-        await onProgress?.(`Next search topic: ${analysis.nextSearchTopic}`);
         query = analysis.nextSearchTopic;
+        await onProgress?.(`Next search topic: ${analysis.nextSearchTopic}`);
       }
     }
-    // Move to the next depth iteration if we haven't returned early
   }
 
-  // If we complete the loops, return
   return {
     learnings: combinedLearnings,
     visitedUrls: combinedUrls,
   };
 }
 
-/**
- * Basic function to produce "sub-queries" for each iteration,
- * referencing known learnings so it can refine.
- */
+/** Helper to produce sub-queries each iteration */
 async function generateSubQueries({
   query,
   existingLearnings,
@@ -254,27 +373,22 @@ async function generateSubQueries({
   count: number;
 }): Promise<string[]> {
   const prompt = `
-You are creating short, specific search queries for investigating the main topic:
-<mainTopic>${query}</mainTopic>
+We want up to ${count} short, realistic search queries to learn more about:
+"${query}"
 
-We have these existing partial learnings:
-${existingLearnings.map((l) => `- ${l}`).join("\n")}
+We already have partial learnings:
+${existingLearnings.map((l) => "- " + l).join("\n")}
 
-Generate up to ${count} short, distinct Google-like queries that each investigate an unresolved angle or gap in the knowledge.
-
-Return JSON in the following format:
+Return:
 {
   "queries": [
-    "short query 1",
-    "short query 2",
+    "short query #1",
+    "short query #2",
     ...
   ]
 }
-
-Ensure each query is short, realistic, and focuses on a single subtopic or new angle.
 `;
-
-  const obj = await generateObject({
+  const response = await generateObject({
     model,
     system: systemPrompt(),
     prompt,
@@ -283,55 +397,72 @@ Ensure each query is short, realistic, and focuses on a single subtopic or new a
     }),
   });
 
-  return obj.object.queries.slice(0, count);
+  return response.object.queries.slice(0, count);
 }
 
 /**
- * After we've compiled all learnings, produce a final "report"
+ * Step 3) mergeSubtopicReports:
+ *  After each subtopic is done in parallel, unify them in a final integrated markdown
  */
-export async function writeFinalReport({
-  prompt,
-  learnings,
-  visitedUrls,
+export async function mergeSubtopicReports({
+  plan,
+  subtopicResults,
   model,
 }: {
-  prompt: string;
-  learnings: string[];
-  visitedUrls: string[];
+  plan: {
+    overarchingGoal: string;
+    subtopics: Array<{
+      name: string;
+      purpose: string;
+      subSubtopics: Array<{
+        name: string;
+        criteria: string;
+      }>;
+    }>;
+  };
+  subtopicResults: Array<{
+    subtopicName: string;
+    learnings: string[];
+    visitedUrls: string[];
+  }>;
   model: ReturnType<typeof createModel>;
-}) {
-  // Merge learnings into a single string
-  const merged = learnings.map((l) => `- ${l}`).join("\n");
-  const sources = visitedUrls.map((u) => `- ${u}`).join("\n");
+}): Promise<string> {
+  // Flatten
+  const combinedLearnings = subtopicResults.flatMap((r) => r.learnings);
+  const allUrls = subtopicResults.flatMap((r) => r.visitedUrls);
 
-  // Let the model produce a final, long markdown doc
+  // We'll pass everything to the LLM for final integrated markdown
+  const prompt = `
+We have an overarching goal: 
+"${plan.overarchingGoal}"
+
+Subtopics with sub-subtopics (the plan):
+${JSON.stringify(plan.subtopics, null, 2)}
+
+We ran parallel research. 
+Here are the results for each subtopic:
+${JSON.stringify(subtopicResults, null, 2)}
+
+Now produce a comprehensive final report in Markdown:
+- Summarize each subtopic's findings
+- Relate them back to the overarchingGoal
+- Outline any missing info or further recommended steps
+- Provide a "Sources" section with visited URLs.
+
+Return JSON:
+{
+  "reportMarkdown": "A single integrated markdown doc"
+}
+`;
+
   const final = await generateObject({
     model,
     system: systemPrompt(),
-    prompt: `
-The user originally asked: <prompt>${prompt}</prompt>
-
-We have the following combined learnings from the multi-step research:
-${merged}
-
-Write a comprehensive final research report in Markdown. 
-It should include:
-- A short introduction
-- Key findings with relevant detail
-- Potential next steps or open questions
-- A "Sources" section listing the visited URLs
-
-Return JSON in the format:
-{
-  "reportMarkdown": "Full markdown text"
-}
-`,
+    prompt,
     schema: z.object({
       reportMarkdown: z.string(),
     }),
   });
 
-  // Optionally append a final "## Sources" if not included
-  const finalReport = final.object.reportMarkdown;
-  return finalReport;
+  return final.object.reportMarkdown;
 }

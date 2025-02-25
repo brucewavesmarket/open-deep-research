@@ -4,6 +4,10 @@ import { z } from "zod";
 import { createModel, type AIModel } from "./ai/providers";
 import { systemPrompt } from "./prompt";
 
+/**
+ * Provide clarifying questions that help shape an overarching goal,
+ * subtopics, and sub-subtopics for the multi-step research agent.
+ */
 export async function generateFeedback({
   query,
   numQuestions = 3,
@@ -15,26 +19,31 @@ export async function generateFeedback({
   modelId?: AIModel;
   apiKey?: string;
 }) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("Missing API key in environment variables.");
-  }
-
   const model = createModel(modelId, apiKey);
 
   const userFeedback = await generateObject({
     model,
     system: systemPrompt(),
-    prompt: `Given the following user query, ask up to ${numQuestions} short follow-up questions to clarify what aspects of the topic they want to explore further.
+    prompt: `
+The user has provided an initial query for a multi-step research agent. 
+This agent will:
+1) Identify an overarching goal (the "WHY" of the research).
+2) Break the query into subtopics, each with a unique purpose and sub-subtopics (success criteria).
+3) Research each subtopic in parallel, focusing on only the relevant info. 
+4) Merge everything in a final integrated report.
 
-Respond in this JSON format:
+We want up to ${numQuestions} clarifying questions that help refine:
+- The overarching goal
+- The subtopics
+- The sub-subtopics or success criteria
+- The scope or target audience
+
+Return exactly JSON:
 {
-  "questions": [
-    "question1",
-    "question2",
-    ...
-  ]
+  "questions": ["q1", "q2", ...]
 }
 
+User Query:
 <query>${query}</query>
 `,
     schema: z.object({

@@ -6,7 +6,7 @@ export async function POST(req: NextRequest) {
   try {
     const { query, numQuestions = 3, modelId = "o3-mini" } = await req.json();
 
-    // Use environment variables directly
+    // Use environment variables (or secure cookies)
     const openaiKey = process.env.OPENAI_API_KEY;
     const firecrawlKey = process.env.FIRECRAWL_KEY;
 
@@ -20,6 +20,7 @@ export async function POST(req: NextRequest) {
     });
 
     try {
+      // We updated generateFeedback to produce subtopic-friendly clarifications
       const questions = await generateFeedback({
         query,
         numQuestions,
