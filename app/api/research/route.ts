@@ -168,7 +168,7 @@ export async function POST(req: NextRequest) {
             
             effectiveBreadth = breadth || parameters.breadth;
             effectiveDepth = depth || parameters.depth;
-            componentDepthMultipliers = parameters.componentDepthMultipliers;
+            componentDepthMultipliers = parameters.componentDepthMultipliers || {};
             
             await safeWrite(
               writer,

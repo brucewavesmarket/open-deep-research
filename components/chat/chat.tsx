@@ -60,7 +60,7 @@ export function Chat({
   // Helper function to call the research endpoint
   const sendResearchQuery = async (
     query: string,
-    config: { breadth: number; depth: number; modelId: string }
+    config: { maxDuration: number; modelId: string }
   ) => {
     try {
       setIsLoading(true);
@@ -82,9 +82,9 @@ export function Chat({
         },
         body: JSON.stringify({
           query,
-          breadth: config.breadth,
-          depth: config.depth,
+          maxDuration: config.maxDuration, 
           modelId: config.modelId,
+          dynamicParameters: true // Always use dynamic parameters
         }),
       });
 
@@ -173,7 +173,7 @@ export function Chat({
 
   const handleSubmit = async (
     userInput: string,
-    config: { breadth: number; depth: number; modelId: string }
+    config: { maxDuration: number; modelId: string }
   ) => {
     if (!userInput.trim() || isLoading) return;
 

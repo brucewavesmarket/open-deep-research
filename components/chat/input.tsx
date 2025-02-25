@@ -11,10 +11,17 @@ import {
   DownloadIcon,
   Settings2,
   XCircleIcon,
+  Clock,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../components/ui/select";
 import {
   availableModels,
   type AIModelDisplayInfo,
@@ -25,8 +32,7 @@ interface MultimodalInputProps {
   onSubmit: (
     input: string,
     config: {
-      breadth: number;
-      depth: number;
+      maxDuration: number;
       modelId: string;
     }
   ) => void;
@@ -37,6 +43,13 @@ interface MultimodalInputProps {
   canDownload?: boolean;
 }
 
+// Define research depth options
+const researchDepthOptions = [
+  { label: "Quick (3 min)", value: 3 },
+  { label: "In-depth (10 min)", value: 10 },
+  { label: "Deep (30 min)", value: 30 },
+];
+
 export function MultimodalInput({
   onSubmit,
   isLoading,
@@ -45,8 +58,7 @@ export function MultimodalInput({
   canDownload = false,
 }: MultimodalInputProps) {
   const [input, setInput] = useState("");
-  const [breadth, setBreadth] = useState(4);
-  const [depth, setDepth] = useState(2);
+  const [maxDuration, setMaxDuration] = useState(3); // Default to 3 minutes (quick)
   const [selectedModel, setSelectedModel] = useState<AIModelDisplayInfo>(
     availableModels.find((model) => model.id === "o3-mini") ||
       availableModels[0]
@@ -100,8 +112,7 @@ export function MultimodalInput({
       return;
     }
     onSubmit(input, {
-      breadth,
-      depth,
+      maxDuration,
       modelId: selectedModel.id,
     });
     setInput("");
@@ -249,29 +260,28 @@ export function MultimodalInput({
           )}
         </div>
 
-        {/* Research Controls */}
+        {/* Research Depth Selector */}
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">B:{breadth}</span>
-          <Slider
-            value={[breadth]}
-            min={2}
-            max={10}
-            step={1}
-            className="w-20"
-            onValueChange={([value]) => setBreadth(value)}
-          />
-        </div>
-
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">D:{depth}</span>
-          <Slider
-            value={[depth]}
-            min={1}
-            max={5}
-            step={1}
-            className="w-20"
-            onValueChange={([value]) => setDepth(value)}
-          />
+          <Clock className="h-4 w-4 text-muted-foreground" />
+          <Select
+            value={maxDuration.toString()}
+            onValueChange={(value: string) => setMaxDuration(parseInt(value))}
+          >
+            <SelectTrigger className="h-7 text-xs px-2 py-0 border-none bg-muted/50">
+              <SelectValue placeholder="Research depth" />
+            </SelectTrigger>
+            <SelectContent>
+              {researchDepthOptions.map((option) => (
+                <SelectItem 
+                  key={option.value} 
+                  value={option.value.toString()}
+                  className="text-xs"
+                >
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         {/* Mobile Download Button */}
@@ -368,34 +378,28 @@ export function MultimodalInput({
           )}
         </div>
 
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">
-              Breadth: {breadth}
-            </span>
-            <Slider
-              value={[breadth]}
-              min={2}
-              max={10}
-              step={1}
-              className="w-24"
-              onValueChange={([value]) => setBreadth(value)}
-            />
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">
-              Depth: {depth}
-            </span>
-            <Slider
-              value={[depth]}
-              min={1}
-              max={5}
-              step={1}
-              className="w-24"
-              onValueChange={([value]) => setDepth(value)}
-            />
-          </div>
+        {/* Research Depth Selector */}
+        <div className="flex items-center gap-2">
+          <Clock className="h-4 w-4 text-muted-foreground" />
+          <Select
+            value={maxDuration.toString()}
+            onValueChange={(value: string) => setMaxDuration(parseInt(value))}
+          >
+            <SelectTrigger className="h-7 text-xs px-2 py-0 border-none bg-muted/50">
+              <SelectValue placeholder="Research depth" />
+            </SelectTrigger>
+            <SelectContent>
+              {researchDepthOptions.map((option) => (
+                <SelectItem 
+                  key={option.value} 
+                  value={option.value.toString()}
+                  className="text-xs"
+                >
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         {/* Desktop Download Button */}

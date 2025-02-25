@@ -150,11 +150,14 @@ For componentDepthMultipliers, identify up to 4 key component types that might b
     schema: z.object({
       breadth: z.number().int(),
       depth: z.number().int(),
-      componentDepthMultipliers: z.record(z.number()),
+      componentDepthMultipliers: z.record(z.number()).optional(),
       estimatedTimeMinutes: z.number(),
       reasoning: z.string(),
     }),
   });
 
-  return parameters.object;
+  return {
+    ...parameters.object,
+    componentDepthMultipliers: parameters.object.componentDepthMultipliers || {}
+  };
 }
