@@ -8,6 +8,18 @@ import {
 } from "@/lib/deep-research";
 import { createModel, type AIModel } from "@/lib/deep-research/ai/providers";
 
+// Define interfaces for the types we need
+interface Subtopic {
+  name: string;
+  [key: string]: any; // Allow for other properties
+}
+
+interface ResearchPlan {
+  overarchingGoal: string;
+  subtopics: Subtopic[];
+  [key: string]: any; // Allow for other properties
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { query, breadth = 3, depth = 2, modelId = "o3-mini" } =
@@ -89,7 +101,7 @@ export async function POST(req: NextRequest) {
 
           // 4) If the plan has subtopics, let's do parallel deep research on each
           //    We'll gather the results for each subtopic
-          const subtopicPromises = plan.subtopics.map((sub) =>
+          const subtopicPromises = plan.subtopics.map((sub: Subtopic) =>
             deepResearchSubtopic({
               subtopic: sub,
               overarchingGoal: plan.overarchingGoal,
@@ -97,7 +109,7 @@ export async function POST(req: NextRequest) {
               depth,
               model,
               firecrawlKey,
-              onProgress: async (update) => {
+              onProgress: async (update: string) => {
                 console.log(`[${sub.name}] progress: ${update}`);
                 await writer.write(
                   encoder.encode(
